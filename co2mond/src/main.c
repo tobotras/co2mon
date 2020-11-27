@@ -46,6 +46,10 @@
 
 int daemonize = 0;
 int print_unknown = 0;
+int decode_data = 1;
+int print_once = 0;
+int only_temp = 0;
+int only_cntr = 0;
 const char *devicefile = NULL;
 char *datadir;
 
@@ -58,6 +62,7 @@ struct co2mon_state {
 
 pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
 struct co2mon_state co2mon;
+int temp_shown = 0, cntr_shown = 0;
 
 static int
 bitarr_isset(uint8_t* bitarr, unsigned int ndx)
@@ -374,7 +379,7 @@ device_loop(co2mon_device dev)
     memset(co2mon.seen, 0, sizeof(co2mon.seen));
     state_unlock();
 
-    while (1)
+    while (!print_once || !temp_shown || !cntr_shown)
     {
         int r = co2mon_read_data(dev, magic_table, result);
         if (r <= 0)
@@ -412,47 +417,52 @@ device_loop(co2mon_device dev)
 
         char buf[VALUE_MAX];
         uint16_t w = (result[1] << 8) + result[2];
-
+				
         switch (r0)
         {
         case CODE_TAMB:
+          if (!only_cntr) {
             snprintf(buf, VALUE_MAX, "%.4f", decode_temperature(w));
-
+			
             if (!daemonize)
-            {
+              {
                 printf("Tamb\t%s\n", buf);
                 fflush(stdout);
-            }
+                temp_shown = 1;
+              }
 
             if (written_tamb != w)
-            {
+              {
                 if (write_value("Tamb", buf))
-                {
+                  {
                     written_tamb = w;
-                }
-            }
+                  }
+              }
+          }
+          write_heartbeat();
 
-            write_heartbeat();
-
-            break;
+          break;
         case CODE_CNTR:
             if ((unsigned)w > 3000) {
                 // Avoid reading spurious (uninitialized?) data
                 break;
             }
-            snprintf(buf, VALUE_MAX, "%d", (int)w);
-
-            if (!daemonize)
-            {
-                printf("CntR\t%s\n", buf);
-                fflush(stdout);
-            }
-
-            if (written_cntr != w)
-            {
-                if (write_value("CntR", buf))
+            if (!only_temp) {
+              snprintf(buf, VALUE_MAX, "%d", (int)w);
+              
+              if (!daemonize)
                 {
-                    written_cntr = w;
+                  printf("CntR\t%s\n", buf);
+                  fflush(stdout);
+                  cntr_shown = 1;
+                }
+              
+              if (written_cntr != w)
+                {
+                  if (write_value("CntR", buf))
+                    {
+                      written_cntr = w;
+                    }
                 }
             }
 
@@ -488,7 +498,7 @@ static void
 main_loop()
 {
     int error_shown = 0;
-    while (1)
+    while (!print_once || !temp_shown || !cntr_shown)
     {
         co2mon_device dev = open_device();
         if (dev == NULL)
@@ -522,7 +532,7 @@ int main(int argc, char *argv[])
     int c;
     int opterr = 0;
     int show_help = 0;
-    while ((c = getopt(argc, argv, ":dhuD:P:f:l:p:")) != -1)
+    while ((c = getopt(argc, argv, ":dnhuotcD:P:f:l:p:")) != -1)
     {
         switch (c)
         {
@@ -534,6 +544,20 @@ int main(int argc, char *argv[])
             break;
         case 'u':
             print_unknown = 1;
+            break;
+        case 'n':
+            decode_data = 0;
+            break;
+        case 'o':
+            print_once = 1;
+            break;
+        case 't':
+            only_temp = 1;
+            cntr_shown = 1;
+            break;
+        case 'c':
+            only_cntr = 1;
+            temp_shown = 1;
             break;
         case 'D':
             reldatadir = optarg;
@@ -561,13 +585,17 @@ int main(int argc, char *argv[])
     }
     if (show_help || opterr || optind != argc)
     {
-        fprintf(stderr, "usage: co2mond [-dhu] [-D datadir] [-f device] [-p pidfle] [-l logfile]\n");
+        fprintf(stderr, "usage: co2mond [-dhuntco] [-D datadir] [-f device] [-p pidfle] [-l logfile]\n");
         if (show_help)
         {
             fprintf(stderr, "\n");
             fprintf(stderr, "  -d    run as a daemon\n");
             fprintf(stderr, "  -h    show this help message\n");
             fprintf(stderr, "  -u    print values for unknown items\n");
+            fprintf(stderr, "  -n    don't decode the data\n");
+            fprintf(stderr, "  -o    print values once and exit\n");
+            fprintf(stderr, "  -t    only show temperature data\n");
+            fprintf(stderr, "  -c    only show CO2 concentration data\n");
             fprintf(stderr, "  -D datadir\n");
             fprintf(stderr, "        store values from the sensor in datadir\n");
             fprintf(stderr, "  -P host:port\n");
@@ -589,6 +617,16 @@ int main(int argc, char *argv[])
     if (daemonize && !reldatadir && !promaddr)
     {
         fprintf(stderr, "co2mond: it is useless to use -d without -D or -P.\n");
+        exit(1);
+    }
+    if (daemonize && print_once)
+    {
+        fprintf(stderr, "co2mond: it is useless to use -d with -o.\n");
+        exit(1);
+    }
+    if (only_temp && only_cntr)
+    {
+        fprintf(stderr, "co2mond: it is useless to use -t with -c.\n");
         exit(1);
     }
 
